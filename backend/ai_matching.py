@@ -1,14 +1,20 @@
-"""Soochow EATs｜AI 智慧媒合與動態獎勵金建議引擎。"""
+"""Soochow EATs｜AI 智慧媒合、動態獎勵金與 Gemini 生成式 AI 引擎。"""
 from __future__ import annotations
 
 from datetime import datetime
+import json
+import os
 import sqlite3
 from uuid import uuid4
+
+from google import genai
+from google.genai import types
 
 MIN_RUNNER_CREDIT = 2.0
 DEFAULT_WAIT_MINUTES = 5.0
 CORE_BUILDINGS = {"A棟", "B棟", "C棟", "H棟"}
 REMOTE_BUILDINGS = {"R棟"}
+GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
 
 
 def get_walk_minutes(conn: sqlite3.Connection, from_loc_id: int, to_loc_id: int) -> float | None:
@@ -340,3 +346,94 @@ def suggest_reward_amount(
         "supply_demand": {"pending_orders": pending_cnt, "available_runners": supply_cnt},
         "reasons": reasons,
     }
+
+
+def generate_ai_recommendation_summary(match_result: dict) -> str:
+    """【Gemini 結果解釋層】將三階段計算的前三名分數轉化為親切的口語推薦理由。"""
+    candidates = match_result.get("recommendations", [])
+    if not candidates:
+        return "目前暫無符合時間與信用條件的順路接單者，建議適度調高獎勵金以吸引接單。"
+
+    top = candidates[0]
+    fallback_msg = (
+        f"首推 {top['display_name']}（綜合推薦分 {top['final_score']} 分）！"
+        f"目前位於{top['current_location']}，預估總耗時僅 {top['t_total_minutes']} 分鐘，"
+        f"信用 {top['runner_credit']} 分且空堂充裕，最能準時送達。"
+    )
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return fallback_msg
+
+    client = genai.Client(api_key=api_key)
+    prompt = (
+        f"你是東吳大學校園代購平台 Soochow EATs 的 AI 媒合助手。"
+        f"目前有一筆從「{match_result['restaurant_name']}」送到「{match_result['delivery_location']}」的訂單，"
+        f"系統處於「{match_result['mode']}」。"
+        f"以下是經過時間、路線與信用公式計算後的前三名候選接單者：{candidates[:3]}。"
+        f"請用繁體中文、80字以內，向發單者推薦第1名接單者並簡述原因，語氣親切精簡，直接輸出推薦內容即可。"
+    )
+
+    for model_name in GEMINI_MODELS:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            if response.text:
+                return response.text.strip()
+        except Exception:
+            continue
+
+    return fallback_msg
+
+
+def parse_natural_language_order(
+    user_text: str,
+    restaurants_list: list[dict],
+    locations_list: list[dict],
+) -> dict:
+    """【Gemini 前端理解層】將學生在 LINE Bot 輸入的一句話解析為結構化訂單草稿。"""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("尚未設定 GEMINI_API_KEY 環境變數，無法使用自然語言解析功能")
+
+    client = genai.Client(api_key=api_key)
+    prompt = f"""
+你是東吳大學校園代購平台的訂單解析助手。請根據使用者的自然語言輸入，從以下資料庫清單中匹配最接近的餐廳與送達地點。
+
+【可選餐廳清單】：
+{json.dumps(restaurants_list, ensure_ascii=False)}
+
+【可選校園送達地點清單】：
+{json.dumps(locations_list, ensure_ascii=False)}
+
+【使用者輸入】：
+「{user_text}」
+
+請嚴格輸出 JSON 格式（不要加 markdown 標記），包含以下欄位：
+- restaurant_id: 匹配到的餐廳整數 ID（若找不到填 null）
+- restaurant_name: 匹配到的餐廳名稱
+- delivery_location_id: 匹配到的送達地點整數 ID（若找不到填 null）
+- delivery_location_name: 匹配到的送達地點名稱
+- item_summary: 使用者想買的餐點與數量摘要（字串）
+- reward_amount: 使用者提到的獎勵金整數（若未提到預設為 15）
+- note: 特殊備註（如不要辣、去冰等，無則填 null）
+"""
+    last_error = None
+    for model_name in GEMINI_MODELS:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                ),
+            )
+            return json.loads(response.text)
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    raise RuntimeError(f"所有備援模型皆暫時無法回應：{last_error}")

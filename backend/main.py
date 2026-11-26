@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 from database import get_connection
 
 from ai_matching import (
+    generate_ai_recommendation_summary,
+    parse_natural_language_order,
     recommend_orders_for_runner,
     run_ai_matching,
     suggest_reward_amount,
@@ -635,10 +637,9 @@ def get_user_credits(user_id: int):
         ).fetchone()
         if user is None:
             raise HTTPException(status_code=404, detail="找不到使用者")
-        return dict(user)
-
+        
 # ------------------------------
-# AI 智慧媒合、空堂設定與獎勵金建議 API
+# AI 智慧媒合、空堂設定、獎勵金建議與 Gemini 解析 API
 # ------------------------------
 class AvailabilityInput(BaseModel):
     user_id: int = Field(gt=0)
@@ -652,6 +653,11 @@ class RewardSuggestInput(BaseModel):
     restaurant_id: int = Field(gt=0)
     delivery_location_id: int = Field(gt=0)
     deadline: str = Field(min_length=16, max_length=30)
+
+
+class NaturalOrderInput(BaseModel):
+    campus: str = Field(default="shuangxi")
+    text: str = Field(min_length=2, max_length=300)
 
 
 @app.post("/users/availability", status_code=201)
@@ -688,11 +694,13 @@ def set_user_availability(payload: AvailabilityInput):
 
 @app.post("/orders/{order_id}/match")
 def match_order_candidates(order_id: int, save_to_db: bool = True):
-    """【訂單找人】執行三階段 AI 智慧媒合，回傳候選接單者排序並寫入 matching_results。"""
+    """【訂單找人】執行三階段 AI 智慧媒合，並由 Gemini 生成推薦理由。"""
     with closing(get_connection()) as conn:
         try:
             with conn:
-                return run_ai_matching(conn, order_id=order_id, save_to_db=save_to_db)
+                result = run_ai_matching(conn, order_id=order_id, save_to_db=save_to_db)
+            result["ai_summary"] = generate_ai_recommendation_summary(result)
+            return result
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
@@ -735,3 +743,36 @@ def get_reward_suggestion(payload: RewardSuggestInput):
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/ai/parse-order")
+def ai_parse_order_text(payload: NaturalOrderInput):
+    """【Gemini 自然語言發單】將一句話轉為結構化訂單草稿供 LINE Bot 確認。"""
+    if payload.campus not in ("shuangxi", "downtown"):
+        raise HTTPException(status_code=400, detail="無效的校區")
+
+    with closing(get_connection()) as conn:
+        restaurants = [
+            dict(r) for r in conn.execute(
+                """SELECT r.restaurant_id, r.restaurant_name
+                   FROM restaurants r JOIN locations l ON l.location_id = r.location_id
+                   WHERE l.campus = ? AND r.is_active = 1""",
+                (payload.campus,),
+            ).fetchall()
+        ]
+        locations = [
+            dict(l) for l in conn.execute(
+                """SELECT location_id, location_name
+                   FROM locations
+                   WHERE campus = ? AND location_type = 'campus'""",
+                (payload.campus,),
+            ).fetchall()
+        ]
+
+    try:
+        parsed = parse_natural_language_order(payload.text, restaurants, locations)
+        return {"input_text": payload.text, "parsed_order": parsed}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Gemini 解析失敗：{exc}")
