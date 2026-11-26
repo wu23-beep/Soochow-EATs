@@ -73,6 +73,10 @@ $python = ".\.venv\Scripts\python.exe"
 | POST | `/orders/{order_id}/complete` | 確認完成並重算信用 |
 | POST | `/orders/{order_id}/cancel` | 取消待接單訂單 |
 | POST | `/orders/{order_id}/reviews` | 提交雙向評價 |
+| POST | `/users/availability` | 接單者設定可接單時段與目前位置 |
+| POST | `/orders/{order_id}/match` | AI 智慧媒合（訂單找人，計算三階段推薦排序） |
+| GET | `/runners/{runner_id}/recommended-orders` | AI 順路推薦（人找訂單，依位置與空堂排序待接訂單） |
+| POST | `/rewards/suggest` | 動態獎勵金建議（依時段、步行距離、樓層與供需計算） |
 
 ## 訂單狀態
 
@@ -112,7 +116,6 @@ $python = ".\.venv\Scripts\python.exe"
 
 - LINE 身分驗證與 API 權限驗證。
 - 已接單後取消及爭議處理。
-- AI 推薦演算法、候選排序及獎勵金建議。
 - LINE Bot 與 Streamlit 前端整合。
 - 真實環境的多程序併發壓力測試。
 - 正式部署、日誌、監控與資料備份自動化。
