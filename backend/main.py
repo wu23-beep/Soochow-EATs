@@ -13,6 +13,11 @@ from pydantic import BaseModel, Field
 
 from database import get_connection
 
+from ai_matching import (
+    recommend_orders_for_runner,
+    run_ai_matching,
+    suggest_reward_amount,
+)
 app = FastAPI(title="Soochow EATs API", version="1.0.0")
 VALID_STATUSES = {"pending", "accepted", "delivered", "completed", "cancelled"}
 
@@ -631,3 +636,102 @@ def get_user_credits(user_id: int):
         if user is None:
             raise HTTPException(status_code=404, detail="找不到使用者")
         return dict(user)
+
+# ------------------------------
+# AI 智慧媒合、空堂設定與獎勵金建議 API
+# ------------------------------
+class AvailabilityInput(BaseModel):
+    user_id: int = Field(gt=0)
+    current_location_id: int = Field(gt=0)
+    available_from: str = Field(min_length=16, max_length=30)
+    available_until: str = Field(min_length=16, max_length=30)
+    willing_to_accept: int = Field(default=1, ge=0, le=1)
+
+
+class RewardSuggestInput(BaseModel):
+    restaurant_id: int = Field(gt=0)
+    delivery_location_id: int = Field(gt=0)
+    deadline: str = Field(min_length=16, max_length=30)
+
+
+@app.post("/users/availability", status_code=201)
+def set_user_availability(payload: AvailabilityInput):
+    """接單者回報目前位置、空堂起訖時間與接單意願。"""
+    try:
+        t_from = datetime.fromisoformat(payload.available_from)
+        t_until = datetime.fromisoformat(payload.available_until)
+        if t_until <= t_from:
+            raise HTTPException(status_code=422, detail="結束時間必須晚於開始時間")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="時間格式請使用 YYYY-MM-DD HH:MM:SS")
+
+    with closing(get_connection()) as conn, conn:
+        user = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (payload.user_id,)).fetchone()
+        loc = conn.execute("SELECT location_id FROM locations WHERE location_id = ?", (payload.current_location_id,)).fetchone()
+        if user is None or loc is None:
+            raise HTTPException(status_code=404, detail="找不到使用者或地點")
+
+        cursor = conn.execute(
+            """INSERT INTO user_availability
+               (user_id, current_location_id, available_from, available_until, willing_to_accept)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                payload.user_id,
+                payload.current_location_id,
+                payload.available_from,
+                payload.available_until,
+                payload.willing_to_accept,
+            ),
+        )
+        return {"availability_id": cursor.lastrowid, "message": "可接單狀態已更新"}
+
+
+@app.post("/orders/{order_id}/match")
+def match_order_candidates(order_id: int, save_to_db: bool = True):
+    """【訂單找人】執行三階段 AI 智慧媒合，回傳候選接單者排序並寫入 matching_results。"""
+    with closing(get_connection()) as conn:
+        try:
+            with conn:
+                return run_ai_matching(conn, order_id=order_id, save_to_db=save_to_db)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/runners/{runner_id}/recommended-orders")
+def get_recommended_orders(
+    runner_id: int,
+    current_location_id: int = Query(gt=0),
+    free_minutes: float = Query(default=45.0, gt=0, le=300),
+):
+    """【人找訂單】接單者輸入目前位置與空堂時間，取得 AI 順路推薦訂單列表。"""
+    with closing(get_connection()) as conn:
+        try:
+            orders = recommend_orders_for_runner(
+                conn,
+                runner_id=runner_id,
+                current_location_id=current_location_id,
+                free_minutes=free_minutes,
+            )
+            return {"runner_id": runner_id, "count": len(orders), "recommended_orders": orders}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/rewards/suggest")
+def get_reward_suggestion(payload: RewardSuggestInput):
+    """【動態獎勵金建議】依時段、步行距離、樓棟與供需狀況建議獎勵金。"""
+    try:
+        datetime.fromisoformat(payload.deadline)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="deadline 格式請使用 YYYY-MM-DD HH:MM:SS")
+
+    with closing(get_connection()) as conn:
+        try:
+            return suggest_reward_amount(
+                conn,
+                restaurant_id=payload.restaurant_id,
+                delivery_location_id=payload.delivery_location_id,
+                deadline_str=payload.deadline,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
