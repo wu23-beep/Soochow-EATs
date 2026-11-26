@@ -12,6 +12,10 @@
 - 訂單送達、完成及待接單取消。
 - 雙向評價與信用分數更新。
 - 雙向信用計算依交接規格書公式實作。
+- 接單者空堂時段與目前位置設定。
+- 雙向 AI 智慧媒合（三階段動態權重計算「訂單找人」與「人找訂單」順路推薦）。
+- 動態獎勵金建議（依尖峰緊迫時段、偏遠大樓、高樓層與即時供需計算）。
+- Google Gemini 生成式 AI 整合（推薦理由白話摘要生成、一句話自然語言發單解析；未設定 API Key 時自動降級為規則式摘要）。
 
 ## 專案結構
 
@@ -26,7 +30,9 @@ Soochow-EATs-main/
     ├── seed_campus_data_with_campus.py
     ├── seed_menu_items.py
     ├── test_mvp_api.py         # 自動化整合測試
-    └── 原有測試腳本
+    ├── 原有測試腳本
+    ├── ai_matching.py          # AI 智慧媒合、動態獎勵金與 Gemini 生成式 AI 引擎
+    └── test_ai_api.py          # AI 媒合與 Gemini 自動化整合測試
 ```
 
 ## 安裝與初始化（Windows PowerShell）
@@ -49,6 +55,9 @@ $python = ".\.venv\Scripts\python.exe"
 ```powershell
 $python = ".\.venv\Scripts\python.exe"
 & $python -m uvicorn main:app --app-dir backend --reload
+
+若要啟用 Gemini 自然語言發單與推薦理由生成，請先於終端機設定免費的 `GEMINI_API_KEY` 環境變數（未設定時推薦理由會自動切換為規則式摘要，不影響伺服器運行）：
+$env:GEMINI_API_KEY="貼上你的_Gemini_API_Key"
 ```
 
 瀏覽器開啟 `http://127.0.0.1:8000/docs`，可直接操作 API。
@@ -77,6 +86,7 @@ $python = ".\.venv\Scripts\python.exe"
 | POST | `/orders/{order_id}/match` | AI 智慧媒合（訂單找人，計算三階段推薦排序） |
 | GET | `/runners/{runner_id}/recommended-orders` | AI 順路推薦（人找訂單，依位置與空堂排序待接訂單） |
 | POST | `/rewards/suggest` | 動態獎勵金建議（依時段、步行距離、樓層與供需計算） |
+| POST | `/ai/parse-order` | Gemini 自然語言發單解析（將口語輸入轉為結構化訂單草稿） |
 
 ## 訂單狀態
 
@@ -99,6 +109,14 @@ MVP 目前只允許待接單訂單取消。已接單後的取消、退款或責�
 - 發單者資訊完整度：餐廳、送達地點、期限及至少一筆餐點明細皆存在，視為完整。
 - 新使用者或尚無樣本的指標暫以 1.0 計算，維持資料庫預設 5 分。
 
+  ## AI 媒合與獎勵金計算口徑（MVP）
+
+- 候選人硬性過濾：同校區、帳號狀態為 `active`、非發單本人，且目前時間落於可接單時段內。
+- 任務總耗時估算：步行至餐廳 ＋ 預設取餐等待 5 分鐘 ＋ 餐廳送達目的地（採用 `walking_times` 含樓層補償時間），總耗時超過剩餘有效空堂者不予推薦。
+- 動態權重配置：一般常態採信用 `0.4`、路線 `0.4`、時間 `0.2`；午餐尖峰（11:50～12:30）切換為信用 `0.3`、路線 `0.3`、時間 `0.4`。同餐廳歷史完成經驗每筆+1 分（上限 +3分）。
+- 動態獎勵金：基礎 15 元，遇尖峰／緊迫時段 +5元、偏遠大樓（R 棟）+5元
+- 生成式 AI 模型：採用 `gemini-3.8-flash`（遇高負載自動切換 `gemini-3.5-flash-lite` 備援）。
+
 以上是為了讓展示流程可運作而採用的統計口徑。若正式競賽規格另有定義，應以團隊最後確認的口徑調整。
 
 ## 自動化測試
@@ -112,6 +130,13 @@ $python = ".\.venv\Scripts\python.exe"
 
 測試涵蓋使用者建立、訂單建立與查詢、接單防重複、送達、完成、雙向評價及信用查詢。
 
+`test_ai_api.py` 同樣使用獨立臨時資料庫，不會寫入正式資料庫。執行：
+
+```powershell
+$env:GEMINI_API_KEY="貼上你的_Gemini_API_Key"
+$python = ".\.venv\Scripts\python.exe"
+& $python backend/test_ai_api.py
+```
 ## MVP 尚未處理
 
 - LINE 身分驗證與 API 權限驗證。
